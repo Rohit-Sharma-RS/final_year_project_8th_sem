@@ -1,741 +1,583 @@
-# Carbon-Aware Eco Routing System
+# 🌿 Eco-Routing — Emission-Aware Navigation for Indian Cities
 
-**A smart routing system that finds environmentally friendly routes by considering pollution, traffic, vegetation, and air quality for any supported city.**
+> **Final Year Project** · AI-Powered Eco-Routing using Real-Time Vehicle Detection, Deep Learning Emission Prediction, and Graph-Based Route Optimization
 
-For the detailed architecture, implementation plan, and data strategy, see [ARCHITECTURE_AND_IMPLEMENTATION_PLAN.md](ARCHITECTURE_AND_IMPLEMENTATION_PLAN.md).
-
-For the full documentation index, see [docs/README.md](docs/README.md).
+[![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)](https://python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.5-EE4C2C?logo=pytorch)](https://pytorch.org)
+[![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-purple)](https://ultralytics.com)
+[![OpenStreetMap](https://img.shields.io/badge/Data-OpenStreetMap-green)](https://openstreetmap.org)
+[![Flask](https://img.shields.io/badge/Server-Flask-black?logo=flask)](https://flask.palletsprojects.com)
 
 ---
 
-## 🧰 Quick Start (Local)
+## 📸 Demo
 
-### 1) Create a virtual environment
+| Route Comparison Map | Web Frontend |
+|---|---|
+| ![Route comparison plot](route_compare_kolkata.png) | Open `http://localhost:5000` after `python serve.py` |
+
+---
+
+## 🧠 What This Project Does
+
+Traditional navigation apps (Google Maps, Waze) optimize for **shortest distance** or **fastest time**. This project routes vehicles through **minimum carbon emissions** instead — finding the greenest path through real Indian city road networks.
+
+The pipeline has **5 stages**:
+
+```
+📷 Camera/Image
+      │
+      ▼
+🚗 YOLOv8 Vehicle Detection    ← counts cars, buses, trucks per road
+      │
+      ▼
+🏙️ Real Road Data (OSM + AQI)  ← Kolkata / Delhi road network
+      │
+      ▼
+🤖 CarbonFusionNet (PyTorch)   ← predicts emission_factor per road segment
+      │
+      ▼
+🗺️ Eco-Routing Graph           ← Dijkstra on emission_factor weights
+      │
+      ▼
+🌐 Web Frontend (Leaflet.js)   ← interactive map with 4 route strategies
+```
+
+---
+
+## 🗂️ Project Structure
+
+```
+final_year_project_8th_sem/
+│
+├── 📄 index.html                    # Web frontend (Leaflet map + YOLO upload)
+├── 📄 serve.py                      # Flask server (routing + YOLO detection)
+├── 📄 eco_route_engine.py           # Master routing engine for Kolkata
+├── 📄 eco_routing.py                # Graph builder + routing algorithms
+├── 📄 run_sumo.py                   # One-command SUMO simulation runner
+│
+├── 📄 carbon_cost_model.py          # CarbonFusionNet — train/evaluate/save
+├── 📄 carbon_fusion_net.pt          # Trained model weights (saved after training)
+│
+├── 📄 generate_synthetic_data.py    # Synthetic training data generator
+├── 📄 synthetic_delhi_roads.csv     # Generated dataset (30,000 rows × 45 cols)
+│
+├── 📄 number_of_vehicles_from_img.py # YOLOv8 real-time vehicle counter
+├── 📄 yolov8n.pt                    # YOLOv8 Nano model weights
+│
+├── 📁 kolkata/
+│   ├── fused_roads.csv              # 11,125 Kolkata road segments
+│   └── fused_roads.geojson          # Same data with GPS geometry
+│
+├── 📁 delhi/
+│   ├── fused_roads.csv              # 7,474 Delhi road segments
+│   └── fused_roads.geojson
+│
+├── 📄 route_compare_kolkata.png     # Generated route comparison plot
+├── 📄 training_curves.png           # ML model training loss curves
+├── 📄 pred_vs_actual.png            # ML model prediction accuracy plot
+│
+└── 📄 requirements.txt
+```
+
+---
+
+## 🚀 Quick Start
+
+### 1. Install dependencies
+
 ```bash
-python -m venv .venv
+pip install ultralytics torch torchvision geopandas networkx osmnx \
+            flask flask-cors pyproj scikit-learn pandas numpy \
+            matplotlib seaborn shapely pyproj
 ```
 
-### 2) Activate it
+### 2. Start the web app
+
 ```bash
-# PowerShell
-.\.venv\Scripts\Activate.ps1
+python serve.py
 ```
 
-### 3) Install dependencies
-If you have a `requirements.txt`, install from it:
+Then open **http://localhost:5000** in your browser.
+
+### 3. Find eco-routes
+
+1. Click **"Use Demo Points"** to load Esplanade → Sealdah (Kolkata)
+2. Or click the map buttons and tap anywhere on the map to set Origin / Destination
+3. **Upload a road photo** (optional) — YOLO will count vehicles and adjust emission factors
+4. Adjust the **time-of-day slider** (rush hours = more vehicles = higher emissions)
+5. Click **"Find Eco-Routes"** — all 4 routes appear on the map with full stats
+
+---
+
+## 📷 YOLO Vehicle Detection (Web Integration)
+
+The web frontend now has **integrated YOLO vehicle detection**. Upload any photo of a road, and the system will:
+
+1. **Run YOLOv8** on the image to count cars, trucks, buses, motorcycles
+2. **Show the annotated image** with bounding boxes drawn on detected vehicles
+3. **Calculate CO₂ per km** based on the detected vehicle mix
+4. **Feed the count into routing** — emission factors scale based on detected traffic density
+
+### How it works in the web UI
+
+```
+User uploads road photo
+        ↓
+POST /api/detect (Flask)
+        ↓
+YOLOv8 counts vehicles  →  Returns {car: 5, truck: 2, bus: 1, motorcycle: 3}
+        ↓
+Frontend shows detection results + annotated image
+        ↓
+User clicks "Find Eco-Routes"
+        ↓
+POST /api/route with vehicle_override=11
+        ↓
+eco_route_engine scales emission_factor on all edges
+        ↓
+Routes computed with YOLO-adjusted emissions
+```
+
+### If no image is uploaded
+
+The system automatically uses **random realistic fallback values** — no crash, no error:
+
+| Source | How it works | Example |
+|---|---|---|
+| **YOLO detection** | Real vehicle counts from uploaded image | car=5, truck=2, bus=1 → 2,364 g CO₂/km |
+| **Random fallback** | Based on road type + hour of day | residential, 8 AM → 85 vehicles → 12,000 g CO₂/km |
+| **CSV stored values** | Pre-computed from real data | Used when available in fused_roads |
+
+### API endpoints
+
+| Endpoint | Method | What it does |
+|---|---|---|
+| `/api/detect` | POST (multipart) | Upload image → YOLO detection → vehicle counts |
+| `/api/route` | POST (JSON) | Compute routes (optional `vehicle_override` from YOLO) |
+| `/api/default_points` | GET | Returns demo origin/destination for Kolkata |
+| `/api/plot` | GET | Returns the route comparison PNG |
+
+---
+
+## 🚦 SUMO Traffic Simulation
+
+[`run_sumo.py`](run_sumo.py) is the **one-command** script to run a full SUMO simulation and eco-routing for any Indian city. It automatically handles all 6 steps.
+
+### Supported cities (presets)
+
+| Keyword | Area | Demo route |
+|---|---|---|
+| `kolkata` | Kolkata, West Bengal | Esplanade → Sealdah Station |
+| `noida` | Noida, Uttar Pradesh | Sector 18 → Sector 62 |
+| `delhi` | New Delhi, Delhi | Connaught Place → Karol Bagh |
+| `mumbai` | Mumbai, Maharashtra | Bandra → Andheri |
+| `bangalore` | Bangalore, Karnataka | MG Road → Koramangala |
+| _any string_ | Any OSM place name | Use `--city "Salt Lake City, Kolkata"` |
+
+### Commands
+
 ```bash
-pip install -r requirements.txt
+# Kolkata (default) — headless, 300s simulation, 100 vehicles
+python run_sumo.py
+
+# Noida with GUI window open
+python run_sumo.py --city noida --gui
+
+# Delhi, evening rush hour, longer simulation
+python run_sumo.py --city delhi --hour 18 --steps 600 --vehicles 200
+
+# Any custom OSM place
+python run_sumo.py --city "Salt Lake City, Kolkata, India"
+
+# Skip SUMO entirely (just run eco-routing with physics fallback)
+python run_sumo.py --city kolkata --skip-sumo
+
+# Force re-download even if files already exist
+python run_sumo.py --city kolkata --force
 ```
 
-Otherwise, see [docs/README.md](docs/README.md) for the dependency list and install manually.
+### What runs automatically (6 steps)
 
-### 4) Run the main pipeline
+```
+Step 1: Download OSM road network for the city (~30–90s first time)
+Step 2: Convert OSM → SUMO .net.xml with netconvert
+Step 3: Generate realistic vehicle routes (cars, buses, trucks, motorcycles)
+Step 4: Write SUMO .sumocfg configuration file
+Step 5: Run SUMO via TraCI → collect CO2/speed/count per road edge
+Step 6: Run eco-routing on results + print detailed WHY explanation
+```
+
+### Sample route explanation output
+
+```
+==============================================================
+  ECO-ROUTING RESULTS — Esplanade → Sealdah Station
+  Data source: SUMO simulation
+==============================================================
+
+  [Lowest Emission]  <-- BEST ECO-ROUTE
+    Distance         : 2.964 km
+    Travel time      : 4.86 min
+    Emission Factor  : 36,762 g CO2
+    Avg vehicles/seg : 95.8
+    Avg speed        : 32.1 km/h
+
+  WHY 'Lowest Emission' IS THE BEST ECO-ROUTE
+  ──────────────────────────────────────────────
+  1. LOWER CONGESTION
+     Eco-route: 95 vehicles/seg vs 105 on shortest route
+     Fewer vehicles = less stop-start idling = lower CO2
+
+  2. BETTER AVERAGE SPEED  (32 km/h vs 28 km/h on shortest)
+
+  3. EMISSION SAVINGS
+     Saves 4,198 g CO2  (10.2% less than shortest route)
+
+  4. COST OF GOING GREEN
+     Extra distance: +0.10 km  |  Extra time: +0.04 min
+     CO2 saved ≈ 35 km driven by a petrol car
+==============================================================
+```
+
+### SUMO requirements
+
+SUMO must be installed separately:
+- **Download:** https://sumo.dlr.de/docs/Installing/index.html
+- **Windows:** Use the installer, adds `netconvert`, `sumo`, `sumo-gui` to PATH
+- **Verify:** `sumo --version` should print version info
+
+> **No SUMO?** Run `python run_sumo.py --skip-sumo` — the physics formula fallback gives results immediately with no SUMO required.
+
+---
+
+## 🛡️ Failsafes & Random Values — Complete Reference
+
+This section documents **every place** where the system uses a fallback, default, or randomly generated value. Nothing crashes silently.
+
+### Failsafe Chain
+
+| Component | Trigger | Fallback Action |
+|---|---|---|
+| **No camera image** | `--source` not provided | Random realistic vehicle count generated by `fallback_vehicle_count()` |
+| **YOLOv8 model missing** | `yolov8n.pt` deleted | Ultralytics auto-downloads it on first run |
+| **ML model missing** | `carbon_fusion_net.pt` not found | `physics_emission_factor()` formula used |
+| **ML inference error** | Bad input shape or NaN | Caught, physics formula used silently |
+| **No SUMO installed** | `netconvert` not in PATH | `--skip-sumo` mode, physics fallback used |
+| **SUMO zero vehicles** | No routes completed | Empty DataFrame returned, physics fallback used |
+| **No path found** | Origin/dest disconnected | Clear error message returned to frontend |
+| **GeoJSON list columns** | OSM multi-value fields | `safe_scalar()` extracts first element |
+| **NaN in CSV columns** | Missing sensor data | Column-specific medians or hardcoded defaults used |
+| **Unknown highway type** | New OSM tag | Falls back to `DEFAULT_COUNT_RANGE = (30, 130)` |
+| **Unknown categorical** | Unseen label in ML | LabelEncoder maps to index 0 (most common class) |
+
+### Random Values Generated by the System
+
+All random values are **seeded (seed=42)** in the synthetic data generator for reproducibility. In live inference, they use `random` without seed for realistic variation.
+
+#### 1. Vehicle Count Fallback — `fallback_vehicle_count(highway, hour)`
+
+When no camera image is provided, vehicle counts are sampled from per-road-type ranges:
+
+| Road Type | Base Range | Morning Peak (8 AM) | Night (2 AM) |
+|---|---|---|---|
+| `residential` | 15–80 | ×1.8 | ×0.05 |
+| `secondary` | 80–200 | ×1.8 | ×0.05 |
+| `tertiary` | 40–140 | ×1.8 | ×0.05 |
+| `primary` | 100–250 | ×1.8 | ×0.05 |
+| `busway` | 20–80 | ×1.8 | ×0.05 |
+| `living_street` | 5–40 | ×1.8 | ×0.05 |
+| _(unknown)_ | 30–130 | ×1.8 | ×0.05 |
+
+Gaussian noise (`σ = 0.15 × range`) is added for realism.
+
+#### 2. Vehicle Type Mix Fallback
+
+Vehicles are split into types using these probability distributions:
+
+| Road Type | Car | Motorcycle | Bus | Truck | Van | Bicycle | Auto |
+|---|---|---|---|---|---|---|---|
+| `residential` | 50% | 25% | 2% | 2% | 5% | 8% | 8% |
+| `secondary` | 40% | 18% | 10% | 12% | 8% | 4% | 8% |
+| `tertiary` | 45% | 22% | 6% | 6% | 7% | 6% | 8% |
+| `primary` | 38% | 15% | 12% | 15% | 8% | 3% | 9% |
+| `busway` | 10% | 5% | 70% | 5% | 5% | 2% | 3% |
+| _(default)_ | 45% | 20% | 7% | 8% | 7% | 6% | 7% |
+
+#### 3. Synthetic Data Generator — `generate_synthetic_data.py`
+
+| Column | How generated | Range |
+|---|---|---|
+| `vehicle_count` | Road-type base × hour multiplier + Gaussian noise | 1–400 |
+| `avg_speed_kmph` | Decreases as congestion increases | 8–80 km/h |
+| `building_density` | Road-type distribution + random | 0–30 |
+| `vegetation_score` | Road-type distribution + random | 0–10 |
+| `temperature_k` | Weather scenario + seasonal noise | 288–318 K |
+| `humidity_pct` | Weather scenario + noise | 10–95% |
+| `AQI` | Weather scenario (dust storm → high, rain → low) | 30–400 |
+| `wind_speed_mps` | Log-normal distribution | 0.1–8 m/s |
+| `carbon_cost` `k` factor | Normal(6.0, **σ=0.15**) — tight noise | 4.0–8.5 |
+
+#### 4. SUMO Vehicle Route Generation
+
+When generating SUMO routes in `run_sumo.py`:
+- **Start edge:** randomly chosen from all edges with outgoing connections
+- **Route length:** 4–10 hops chosen at random
+- **Vehicle type:** sampled from weighted distribution (car_petrol 38%, motorcycle 20%, etc.)
+- **Departure time:** spread across simulation duration
+- **Random seed:** `seed=42` for reproducibility
+
+---
+
+## 📋 Detailed Usage
+
+### Run route comparison from CLI
+
 ```bash
-python pipeline.py
+# Kolkata: Esplanade → Sealdah
+python eco_route_engine.py \
+  --origin-lat 22.5680 --origin-lon 88.3512 \
+  --dest-lat   22.5756 --dest-lon   88.3697 \
+  --plot route_compare_kolkata.png
+
+# Custom hour (affects vehicle density)
+python eco_route_engine.py ... --hour 18   # 6 PM rush hour
 ```
 
-### 5) Run eco-routing
+### Detect vehicles in a road image
+
 ```bash
-python eco_routing.py --src <origin_node_id> --dest <destination_node_id> --plot route_compare.png
+# From a saved image
+python number_of_vehicles_from_img.py --source road.jpg
+
+# Live webcam (real-time)
+python number_of_vehicles_from_img.py --source 0
+
+# From a video file
+python number_of_vehicles_from_img.py --source traffic.mp4
 ```
 
-### 6) Route API example (Phase 4)
-Start the API server:
+### Generate synthetic training data
+
 ```bash
-python phase4/run_api.py
+# 30,000 rows (default)
+python generate_synthetic_data.py
+
+# Custom size and output
+python generate_synthetic_data.py --rows 50000 --output big_training_data.csv
 ```
 
-Compare routes:
+### Train the emission prediction model
+
 ```bash
-curl -X POST http://127.0.0.1:5001/route/compare \
-   -H "Content-Type: application/json" \
-   -d '{"origin": 290731701, "destination": 13851397444, "plot_path": "route_compare_api.png"}'
+# Train on synthetic + real Delhi data
+python carbon_cost_model.py --also-real --epochs 150 --batch-size 512
+
+# Quick test run (5 epochs)
+python carbon_cost_model.py --epochs 5
 ```
 
 ---
 
-## 📦 Data & Large Files
+## 🏗️ Architecture Deep-Dive
 
-This repo **does not** track large datasets or generated artifacts in Git to avoid GitHub file size limits.
+### Stage 1 — YOLOv8 Vehicle Detection
 
-### Where to get the data
-1. Download the required datasets from Google Drive (project share). If you do not have access, ask the maintainer for the link.
-2. Extract all files into the project root so the file layout matches the expected paths.
+[`number_of_vehicles_from_img.py`](number_of_vehicles_from_img.py) uses **YOLOv8 Nano** (6 MB) to detect vehicles in real-time:
 
-Expected top-level files after download:
-- `fused_roads*.csv`
-- `fused_roads*.geojson`
-- `kolkata.net.xml`, `traffic.rou.xml`, `kolkata.sumocfg`
-- `emissions.xml`, `summary.xml`, `tripinfo.xml`
+| Vehicle Type | COCO ID | CO₂ Factor (g/km) |
+|---|---|---|
+| Car | 2 | 120 |
+| Motorcycle | 3 | 72 |
+| Bus | 5 | 822 |
+| Truck | 7 | 900 |
+| Van | — | 200 |
+| Auto-rickshaw | — | 85 |
+| Bicycle | — | 0 |
 
-### Why files are ignored
-Large files like `kolkata.net.xml` and `fused_roads*.geojson` exceed GitHub limits.
-They are excluded via [.gitignore](.gitignore). If you need to version them, use Git LFS.
-
----
-
-## 🗂️ Project Structure (Important)
-
-- `pipeline.py` → end-to-end pipeline runner
-- `phase1/`, `phase2/`, `phase3/` → modular pipeline stages
-- `sumo_integration.py` → SUMO setup + simulation
-- `eco_routing.py` → route comparison and visualization
-- `docs/` → full documentation
+**Fallback:** If no image is provided, realistic vehicle counts are generated based on road type and time of day (morning rush = 1.8× base count, 2 AM = 0.1× base count).
 
 ---
 
-## 📌 Project Overview
+### Stage 2 — Road Network Data
 
-### The Problem 🚗💨
-Current GPS apps (Google Maps, Waze) only show:
-- Shortest distance route
-- Fastest time route
+Real road data fused from three sources:
 
-**They ignore environmental impact!**
+| Source | Data |
+|---|---|
+| **OpenStreetMap** | Road geometry, length, lanes, highway type |
+| **OpenWeatherMap** | Temperature, humidity, wind speed, weather |
+| **OpenWeather Air Pollution** | PM2.5, PM10, NO₂, O₃, SO₂, CO, AQI |
 
-### Our Solution 🌱
-We created a routing system that:
-- Considers pollution levels
-- Counts nearby buildings (more buildings = more pollution)
-- Counts nearby trees (more trees = less pollution)  
-- Tracks traffic and vehicle emissions
-- Monitors air quality
-- **Finds routes that produce LEAST CO₂!**
-
-### Real-World Impact 🎯
-If 10,000 people in any major city use eco-routing daily:
-- **18,250 tons of CO₂ saved per year**
-- Equivalent to **planting 830,000 trees** 🌳
-- Or **removing 4,000 cars** from roads!
+- **Kolkata:** 11,125 road segments, 4,481 nodes
+- **Delhi:** 7,474 road segments
 
 ---
 
-## 🔬 What We've Done So Far
+### Stage 3 — Synthetic Data Generator
 
-### ✅ **Phase 1: Data Fusion** (COMPLETED)
+[`generate_synthetic_data.py`](generate_synthetic_data.py) creates realistic training data because the real data has only one weather snapshot (not enough diversity for ML).
 
-**File**: [`pipeline.py`](pipeline.py)
+**What makes it realistic:**
+- Hour-of-day traffic multiplier (8 AM peak = 1.8×, 2 AM = 0.1×)
+- Vehicle-type mix per road class (busway = 70% buses, residential = 50% cars)
+- Speed inversely tied to congestion
+- 12 weather scenarios (clear sky, fog, dust storm, rain, etc.)
+- Physics-based `emission_factor` formula calibrated to real data (R=0.93)
 
-#### What is Data Fusion?
-**Simple answer**: Combining information from different sources into ONE complete dataset.
-
-**Analogy**: Like making a smoothie 🍹
-- You take bananas 🍌 + strawberries 🍓 + milk 🥛 + honey 🍯
-- Blend them together → ONE delicious drink!
-
-**Our data fusion**:
-- We take roads 🛣️ + buildings 🏢 + trees 🌳 + traffic 🚗 + weather 🌬️ + air quality 🏭
-- Combine them → ONE complete dataset with all information!
+**Output columns include:** `n_car`, `n_motorcycle`, `n_bus`, `n_truck`, `n_van`, `n_bicycle`, `n_auto`, `co2_per_km_g`, `base_cost_feature`, `hour_of_day`, `day_of_week`, `is_weekend` + all original road columns.
 
 ---
 
-### 📊 Data Sources (6 Sources Combined)
+### Stage 4 — CarbonFusionNet (Deep Learning Model)
 
-#### 1. **Road Network** 🛣️
-- **Source**: OpenStreetMap
-- **What**: All streets and roads in the selected city
-- **Count**: **90,915 road segments**
-- **Example**: 
-  ```
-  Park Street: 500 meters long
-  MG Road: 800 meters long
-  ```
-
-#### 2. **Buildings** 🏢
-- **Source**: OpenStreetMap  
-- **What**: Houses, shops, apartments, offices
-- **Count**: **191,350 buildings**
-- **Why it matters**: More buildings = More people = More pollution
-- **Example**:
-  ```
-  Park Street: 25 buildings within 50 meters
-  MG Road: 15 buildings within 50 meters
-  ```
-
-#### 3. **Vegetation** 🌳 (Trees & Parks)
-- **Source**: OpenStreetMap
-- **What**: Parks, gardens, forests, trees
-- **Count**: **898 green areas**
-- **Why it matters**: Trees clean the air and absorb CO₂
-- **Example**:
-  ```
-  Park Street: 2 parks nearby
-  MG Road: 8 parks nearby (More green = Better!)
-  ```
-
-#### 4. **Traffic Data** 🚗
-- **Source**: Simulated (random for now)
-- **What**: Number of vehicles, their speed
-- **Example**:
-  ```
-  Park Street: 150 cars at 30 km/h
-  MG Road: 80 cars at 45 km/h
-  ```
-- **Note**: Will be replaced by SUMO simulation for realistic data
-
-#### 5. **Weather** 🌬️
-- **Source**: OpenWeatherMap API (Live data!)
-- **What**: Wind speed and direction
-- **Why it matters**: Wind can blow pollution away
-- **Example**:
-  ```
-  Today: Wind speed 2.08 m/s, blowing from north
-  ```
-
-#### 6. **Air Quality Index (AQI)** 🏭
-- **Source**: OpenWeatherMap API (Live data!)
-- **What**: How polluted the air is right now
-- **Scale**: 
-  - 0-50 = Good 😊
-  - 51-100 = Moderate 😐
-  - 101-150 = Unhealthy 😷
-- **Example**:
-  ```
-  Today: AQI = 100 (Moderate pollution)
-  ```
-
----
-
-### 🧮 Carbon Cost Formula
-
-For each road, we calculate a **pollution score** (carbon cost):
+[`carbon_cost_model.py`](carbon_cost_model.py) implements a **multi-branch fusion neural network** in PyTorch:
 
 ```
-carbon_cost = (distance × 0.12 × vehicle_count) 
-            + (buildings × 5) 
-            - (trees × 3) 
-            + (AQI × 0.2)
+Input Features (45 columns)
+         │
+    ┌────┴──────────────────────────────────┐
+    │          6 PARALLEL BRANCHES          │
+    ├───────────────────────────────────────┤
+    │  Road Geometry    → 128-d vector      │
+    │  Traffic          → 128-d vector      │
+    │  Emissions/CO2    → 128-d vector      │
+    │  Environment/AQI  → 128-d vector      │
+    │  Temporal (cyclic)→ 128-d vector      │
+    │  Categorical Emb  → 128-d vector      │
+    └────────────────────────────────────────┘
+                   │
+            Gated Attention Fusion
+         (learns which branch matters most)
+                   │
+          Regression Head → emission_factor
 ```
 
-**Breaking it down**:
-- `distance × vehicle_count` → More cars driving longer = more fuel burned 🔥
-- `buildings × 5` → More buildings = more pollution sources 🏢
-- `trees × 3` → More trees = LESS pollution (that's why minus!) 🌳
-- `AQI × 0.2` → Current air pollution level 💨
+**Training results (R² = 0.68, MAPE = 27%):**
+- Dataset: 30,000 synthetic + 7,474 real Delhi rows
+- Demo prediction: 952 g CO₂ vs real reference 885 g CO₂ (**7.5% error**)
 
-**Example for Park Street**:
-```
-Distance: 500 meters
-Cars: 150
-Buildings: 25
-Parks: 2
-AQI: 100
-
-Carbon Cost = (500 × 0.12 × 150) + (25 × 5) - (2 × 3) + (100 × 0.2)
-            = 9,000 + 125 - 6 + 20
-            = 9,139 (High pollution!)
-```
-
-**Example for MG Road**:
-```
-Distance: 800 meters
-Cars: 80
-Buildings: 15
-Parks: 8
-AQI: 100
-
-Carbon Cost = (800 × 0.12 × 80) + (15 × 5) - (8 × 3) + (100 × 0.2)
-            = 7,680 + 75 - 24 + 20
-            = 7,751 (Medium pollution)
-```
-
-**Result**: MG Road is greener than Park Street! ✅
+Key design choices:
+- **Huber loss** — robust to outlier roads
+- **log1p target transform** — handles heavy skew (range: 5–156,000)
+- **Cyclic sin/cos encoding** for hour/day-of-week
+- **Early stopping** with patience=25
 
 ---
 
-### 📁 Output Files from Phase 1
+### Stage 5 — Eco-Routing Graph
 
-After running [`pipeline.py`](pipeline.py), we created:
+[`eco_route_engine.py`](eco_route_engine.py) builds a **directed weighted graph** (NetworkX MultiDiGraph) where each edge weight = `emission_factor`.
 
-| File | Size | What it contains |
-|------|------|------------------|
-| `fused_roads.geojson` | ~50 MB | Geographic data (for maps) |
-| `fused_roads.csv` | ~30 MB | Table data (for analysis) |
+**Four routing strategies compared:**
 
-**Each road now has complete information**:
-```csv
-road_id, length, buildings, vegetation, traffic, speed, wind, aqi, carbon_cost
-52151691, 500, 25, 2, 150, 30, 2.08, 100, 9139
-115880793, 800, 15, 8, 80, 45, 2.08, 100, 7751
-```
+| Strategy | Weight | Use Case |
+|---|---|---|
+| Shortest Distance | `length` | Minimize km driven |
+| Fastest Time | `time = length / speed` | Minimize travel time |
+| **Lowest Emission ✅** | `emission_factor` | **Minimize CO₂** |
+| Balanced | `0.5×EF + 0.3×time + 0.2×dist` | Real-world compromise |
 
----
+All use **Dijkstra's Algorithm** (`nx.shortest_path`).
 
-### ✅ **Phase 2: SUMO Integration** (COMPLETED!)
+**Sample results (Esplanade → Sealdah, Kolkata):**
 
-**File**: [`sumo_integration.py`](sumo_integration.py)
+| Strategy | Distance | Time | Emission Factor |
+|---|---|---|---|
+| Shortest Distance | 2.865 km | 4.9 min | 40,960 g CO₂ |
+| Fastest Time | 3.016 km | 4.66 min | 40,443 g CO₂ |
+| **Lowest Emission** | **2.964 km** | **4.86 min** | **36,762 g CO₂** |
 
-#### What is SUMO?
-**SUMO** = **S**imulation of **U**rban **MO**bility
-
-**Simple answer**: Software that creates realistic traffic simulation (like SimCity for roads!)
-
-**Why we need it**:
-- Phase 1 used **random traffic numbers** (just guessing - 40% accurate)
-- SUMO gives **realistic traffic** by actually simulating vehicles driving around (90% accurate)
+> 💚 **Eco-route saves 4,198 g CO₂ (10.2%)** with only +0.1 km extra distance
 
 ---
 
-### 🚗 What SUMO Does
+## 🌐 Web Frontend Features
 
-#### Before SUMO (Random Data):
-```python
-vehicle_count = random(20, 200)  # Just guessing!
-avg_speed = random(20, 60)       # No idea if correct!
-```
+[`index.html`](index.html) + [`serve.py`](serve.py) — a dark-themed single-page app:
 
-**Problem**: Might be totally wrong! ❌
-
-#### With SUMO (Realistic Simulation):
-```
-Spawn virtual cars, buses, trucks
-Let them drive for 5 minutes
-Follow traffic rules
-Get stuck in traffic jams
-Calculate real emissions
-Collect actual data
-```
-
-**Result**: Accurate traffic data! ✅
+- **Interactive Leaflet.js map** with dark CartoDB tiles
+- **Click-to-place** origin and destination markers
+- **Time-of-day slider** (affects vehicle density simulation)
+- **4 color-coded routes** drawn simultaneously on the map
+- **Savings panel** — shows CO₂ saved vs shortest route
+- **Full-size plot modal** — click the chart thumbnail to expand
+- **Demo button** — one-click load of Esplanade → Sealdah
 
 ---
 
-### 🚙 Vehicle Types in SUMO
-
-SUMO simulates **6 different vehicle types** with real emissions:
-
-| Vehicle | Emoji | CO₂ Emission | % of Traffic | Color |
-|---------|-------|--------------|--------------|-------|
-| **Petrol Cars** | 🚗 | High | 40% | Red |
-| **Diesel Cars** | 🚙 | Very High | 25% | Blue |
-| **Electric Cars** | ⚡ | ZERO! | 5% | Green |
-| **Buses** | 🚌 | Highest | 10% | Yellow |
-| **Motorcycles** | 🏍️ | Low | 15% | Purple |
-| **Trucks** | 🚚 | Very High | 5% | Gray |
-
----
-
-### 🔄 SUMO Integration Process
-
-#### Step 1: Download Road Network ✅
-```
-Downloaded road network for the selected city from OpenStreetMap
-Saved as: city_roads.osm (example filename)
-```
-
-#### Step 2: Convert to SUMO Format ✅
-```
-Converted OSM → SUMO network
-Created: city.net.xml (example filename)
-Added traffic signals, junctions, turn rules
-```
-
-#### Step 3: Generate Vehicle Routes ✅
-```
-Created vehicle type definitions (cars, buses, etc.)
-Generated random trips (where vehicles want to go)
-Calculated routes (how to get there)
-Created: traffic.rou.xml
-```
-
-#### Step 4: Run Simulation ✅ (COMPLETED!)
-```
-Started SUMO simulation for 5 minutes
-Spawned vehicles (cars, buses, trucks, motorcycles)
-Collected data every 60 seconds
-Simulation completed full 300 seconds!
-✓ Success!
-```
-
-**Status**: Full simulation data collected!
-
----
-
-### 📊 What We Achieved
-
-**Simulation Timeline**:
-```
-Time 0s:   ▶️ Traffic simulation started
-Time 60s:  📊 Data collected (20%)
-Time 120s: 📊 Data collected (40%)
-Time 180s: 📊 Data collected (60%)
-Time 240s: 📊 Data collected (80%)
-Time 300s: 📊 Data collected (100%) ✅ Complete!
-```
-
-**Data Collected**:
-- **256,098 edge records** with traffic data
-- Vehicle counts per road (realistic numbers!)
-- Average speeds (51.2 km/h average)
-- **53 grams of CO₂** emissions measured
-- Full 5 minutes of simulation time
-
-**Files Created**:
-- ✅ `city.net.xml` - SUMO network (example filename)
-- ✅ `traffic.rou.xml` - Vehicle routes  
-- ✅ `city.sumocfg` - Configuration
-- ✅ `emissions.xml` - Emission data
-- ✅ `summary.xml` - Statistics
-- ✅ `sumo_traffic_data.csv` - **Complete traffic data!**
-- ✅ `fused_roads_with_sumo.geojson` - **Enhanced dataset!**
-- ✅ `fused_roads_with_sumo.csv` - **Final merged data!**
-
----✅ **Data Fusion** - Combined 6 data sources (90,915 roads)
-2. ✅ **Carbon Cost Calculation** - Formula working perfectly
-3. ✅ **SUMO Network Setup** - Network files created for the selected city
-4. ✅ **SUMO Simulation** - **Full 5 minutes completed!**
-5. ✅ **Data Collection** - **256,098 traffic records collected!**
-6. ✅ **Data Merging** - **Enhanced dataset created!**
-   - Matched **175,764 roads** (97% match rate!)
-   - Average carbon cost improved: **983 → 208** (79% more accurate!)
-   - Average speed: **39.5 → 51.2 km/h** (more realistic!)
-
-### ⏳ To Do Next:
-1. **Eco-Routing** - Find routes between points
-2. **Compare strategies** - Shortest vs Fastest vs Eco vs Balanced
-3. **Visualization** - Show routes on interactive map
-4. **Testing** - Try multiple origin-destination pairs
-5. **Final Documentation** - Results report & presentation
-1. **Eco-Routing** - Find routes between points
-2. **Compare strategies** - Shortest vs Fastest vs Eco
-3. **Visualization** - Show routes on map
-4. **Testing** - Try multiple routes
-5. **Documentation** - Final report
-
----
-
-## 💻 Technical Stack
-
-| Component | Technology |
-|-----------|-----------|
-| **Language** | Python 3.13 |
-| **Mapping** | OSMnx, GeoPandas |
-| **Data** | Pandas, NumPy |
-| **Traffic Simulation** | SUMO, TraCI |
-| **Weather API** | OpenWeatherMap |
-| **Routing** | NetworkX |
-| **Visualization** | Folium, Matplotlib |
-
----
-
-## 📊 Example: Comparing Two Routes
-
-### Scenario: Going from Howrah Bridge to Science City
-
-#### Route A (Main Highway - Busy):
-```
-Distance: 8 km
-Buildings nearby: 400
-Parks nearby: 2
-Traffic: 800 cars at 15 km/h (traffic jam!)
-Wind: 2.08 m/s
-AQI: 100
-────────────────────────────
-Carbon Cost: 115,520 😱 (Very high pollution!)
-```
-
-#### Route B (Side Roads - Through Park):
-```
-Distance: 10 km (2 km longer)
-Buildings nearby: 150
-Parks nearby: 15
-Traffic: 120 cars at 45 km/h (smooth)
-Wind: 2.08 m/s
-AQI: 100
-────────────────────────────
-Carbon Cost: 15,325 ✨ (Much cleaner!)
-```
-
-**Comparison**:
-- Route B is 2 km longer
-- But produces **87% LESS pollution!**
-- Also faster (less traffic jam)
-- Healthier (more trees, cleaner air)
-
-**Winner**: Route B! 🌱
-
----
-
-## � SUMO Simulation Results
-
-### Simulation Statistics:
-- ✅ **Duration**: Full 5 minutes (300 seconds)
-- ✅ **Traffic Records**: 256,098 edge measurements
-- ✅ **Total CO₂ Measured**: 53 grams
-- ✅ **Roads Matched**: 175,764 out of 180,774 (97% success!)
-
-### Data Accuracy Improvement:
-
-| Metric | Before SUMO (Random) | After SUMO (Realistic) | Improvement |
-|--------|----------------------|-----------------------|-------------|
-| **Avg Vehicle Count** | 109.6 vehicles | Realistic simulation | More accurate |
-| **Avg Speed** | 39.5 km/h | 51.2 km/h | 30% more realistic |
-| **Avg Carbon Cost** | 983.0 | 207.8 | **79% improvement!** |
-
-### What This Means:
-- 🎯 **Random data overestimated pollution by 5x!**
-- ✅ **SUMO gives realistic traffic patterns**
-- ✅ **Carbon costs are now accurate**
-- ✅ **Ready for precise eco-routing**
-
----
-
-## �🎯 Project Goals
-
-### Short Term:
-- ✅ Prove that eco-routing saves 30-40% CO₂
-- ✅ Show that trade-off is minimal (only 10% more time)
-- ✅ Create working prototype
-
-### Long Term Vision:
-- 📱 Mobile app for users in any supported city
-- 🚴 Add cycling and walking routes
-- ⚡ Optimize for electric vehicles
-- 🌍 Expand to other Indian cities
-- 🤝 Partner with Google Maps / Ola
-
----
-
-## 🔍 Key Insights
-
-### 1. Data Fusion is Powerful
-Combining 6 data sources gives complete picture that no single source provides.
-
-### 2. Green Routes Exist
-There are always alternative routes with 30-40% less pollution.
-
-### 3. Small Detours, Big Impact
-Taking a road 1-2 km longer can cut pollution in half!
-
-### 4. Trees Matter
-Roads near parks have significantly lower carbon costs.
-
-### 5. Traffic is Key
-Smooth-flowing traffic (45 km/h) pollutes less than jams (15 km/h).
-
----
-
-## 📚 Documentation Files
-
-We've created detailed explanations:
-
-1. **[DATA_FUSION_EXPLAINED.md](DATA_FUSION_EXPLAINED.md)** 
-   - How we combine 6 data sources
-   - Explained like you're in 7th standard
-   - With examples and analogies
-
-2. **[SUMO_INTEGRATION_EXPLAINED.md](SUMO_INTEGRATION_EXPLAINED.md)**
-   - How SUMO simulation works
-   - Vehicle types and emissions
-   - Step-by-step process
-
-3. **[NEXT_STEPS.md](NEXT_STEPS.md)**
-   - What to do after simulation
-   - Two paths: Quick finish vs Full accuracy
-   - Timeline and deliverables
-
-4. **[PIPELINE_DOCUMENTATION.md](PIPELINE_DOCUMENTATION.md)**
-   - Technical details of data fusion
-   - API usage
-   - Performance optimization
-
-5. **[PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md)**
-   - Complete project phases
-   - Current status
-   - Next steps
-
----
-
-## 🚀 How to Run
-
-### Phase 1: Data Fusion
-```powershell
-cd "E:\cllg project\sem8\proj"
-C:/Python313/python.exe pipeline.py
-```
-
-**Output**: `fused_roads.geojson`, `fused_roads.csv`
-
-### Phase 2: SUMO Integration
-```powershell
-C:/Python313/python.exe sumo_integration.py
-```
-
-**Output**: SUMO simulation files, traffic data
-
-### Phase 3: Eco-Routing (Coming Next)
-```powershell
-C:/Python313/python.exe eco_routing.py
-```
-
-**Output**: Routes with carbon comparison
-
----
-
-## 📊 Statistics
-
-### Data Volume:
-- **Roads**: 90,915 segments
-- **Buildings**: 191,350 structures
-- **Vegetation**: 898 green areas
-- **Total dataset**: ~50 MB
-
-### Processing:
-- **Spatial queries**: Optimized with R-tree indexing
-- **Performance**: 78 seconds (instead of hours)
-- **Efficiency**: ~2 million checks (instead of 17 billion!)
-
-### Coverage:
-- **Area**: Selected city or region
-- **Population**: ~15 million people
-- **Road types**: All drivable roads
-
----
-
-## 🎓 What I Learned
-
-### Technical Skills:
-- ✅ Geographic data processing (GeoJSON, Shapefiles)
-- ✅ Spatial analysis (buffers, intersections)
-- ✅ API integration (OpenWeatherMap)
-- ✅ Traffic simulation (SUMO)
-- ✅ Graph algorithms (routing)
-- ✅ Data fusion techniques
-
-### Problem Solving:
-- ✅ How to combine diverse data sources
-- ✅ How to optimize spatial queries (R-tree)
-- ✅ How to calculate environmental impact
-- ✅ How to balance speed vs accuracy
-
-### Domain Knowledge:
-- ✅ Urban transportation systems
-- ✅ Environmental pollution factors
-- ✅ Traffic patterns and behavior
-- ✅ CO₂ emission calculations
-
----
-
-## 🐛 Challenges Faced
-ompletion
-**Problem**: Initial simulation ended after 2 minutes (vehicles finished early)
-**Solution**: Adjusted vehicle spawn rate and route parameters
-**Status**: ✅ SOLVED! Full 5-minute simulation completed successfully!al indexing → Only 2M checks
-**Result**: From hours to 78 seconds ✅
-
-### Challenge 2: SUMO Simulation Crash
-**Problem**: Simulation ends after 2 minutes (vehicles finish early)
-**Solution**: Generate more vehicles, longer routes
-**Status**: Working on fix
-
-### Challenge 3: API Rate Limits
-**Problem**: Weather API has request limits
-**Solution**: Cache data, reuse for multiple trials
-**Result**: No repeated API calls ✅
-
----
-
-## 🌟 Innovation Highlights
-
-### What Makes This Project Unique?
-
-1. **First carbon-aware routing for the selected city** 🌍
-   - No existing app considers pollution
-
-2. **Multi-factor optimization** 🎯
-   - Not just distance/time, but 6 data sources
-
-3. **Real-time data integration** ⚡
-   - Live weather and AQI
-
-4. **Scalable approach** 📈
-   - Works for any city, just change location
-
-5. **Measurable impact** 📊
-   - Can calculate exact CO₂ savings
-x] Complete SUMO integration (realistic traffic) ✅ **DONE!**
----
-
-## 💡 Future Enhancements
-
-### Technical:
-- [ ] Complete SUMO integration (realistic traffic)
-- [ ] Real-time traffic updates
-- [ ] Machine learning for traffic prediction
-- [ ] Mobile app development
-
-### Features:
-- [ ] User preferences (I accept X% more time for Y% less pollution)
-- [ ] Alternative vehicle types (bike, walk, EV)
-- [ ] Time-of-day routing (morning rush vs night)
-- [ ] Weather-aware routing (rain, fog)
-
-### Scale:
-- [ ] Expand to more cities and regions worldwide
-- [ ] API for third-party integration
-- [ ] Open-source community version
-
----
-
-## 👥 Team (or Your Name)
-
-**Project By**: [Your Name]  
-**Roll Number**: [Your Roll No]  
-**Institution**: [College Name]  
-**Course**: Semester 8 Project  
-**Guide**: [Guide Name]  
-**Date**: March 2026
-
----
-
-## 📞 Contact
-
-**Email**: [your.email@example.com]  
-**GitHub**: [github.com/yourusername]  
-**LinkedIn**: [linkedin.com/in/yourprofile]
-
----
-
-## 📄 License
-
-This project is for academic purposes.
-
----
-
-## 🙏 Acknowledgments
-
-- **OpenStreetMap** - For road, building, and vegetation data
-- **OpenWeatherMap** - For live weather and AQI data
-- **SUMO/DLR** - For traffic simulation software
-- **OSMnx Team** - For Python geospatial tools
-- **My Guide** - For support and guidance
-
----
-
-## 📊 Quick Facts
+## 📊 Model Performance
 
 | Metric | Value |
-|--------|-------|
-| **CO₂ Savings** | 30-40% per trip |
-| **Time Trade-off** | Only 10-15% more |
-| **Roads Analyzed** | 90,915 segments |
-| **Buildings Mapped** | 191,350 structures |
-| **Green Spaces** | 898 areas |
-| **Dataset Size** | ~50 MB |
-| **Processing Time** | 78 seconds |
-| **SUMO Traffic Records** | 256,098 measurements ✅ |
-| **Roads Matched** | 175,764 (97% success) ✅ |
-| **Carbon Cost Accuracy** | 79% improvement ✅ |
-| **Potential Impact** | 18,250 tons CO₂/year |We successfully ran SUMO simulation with 256,098 traffic records and matched 97% of roads with realistic traffic data. The enhanced dataset shows 79% improvement in carbon cost accuracy.**
+|---|---|
+| R² Score | 0.68 |
+| MAE | 458 g CO₂ |
+| MAPE | 27.2% |
+| RMSE | 3,050 g CO₂ |
+| Demo prediction error | 7.5% |
 
-**Status**: Data fusion complete ✅ | SUMO integration complete ✅ | **Ready for eco-routing phase!** 🚀
-
-## 🎯 Bottom Line
-
-**We created a routing system that finds eco-friendly routes by combining 6 data sources (roads, buildings, trees, traffic, weather, air quality) and calculating carbon cost for each road. Early tests show 30-40% CO₂ savings with minimal time trade-off.**
-
-**Status**: Data fusion complete ✅ | SUMO integration in progress 🔄 | Eco-routing next ⏳
+Training: 150 epochs, AdamW + OneCycleLR, Huber loss, batch size 512, CPU (no GPU required).
 
 ---
 
-**Made with 💚 for cleaner cities worldwide**
+## 🔧 Fallback System
+
+The pipeline is designed to never crash — every component has a fallback:
+
+| Component | Primary | Fallback |
+|---|---|---|
+| Vehicle detection | YOLOv8 camera/image | Random realistic count by road type + hour |
+| Emission prediction | CarbonFusionNet ML | Physics formula: `count/speed × length × 6.0` |
+| Route finding | Dijkstra on emission graph | Returns clear error message if no path |
+| GeoJSON columns | Normal scalar values | `safe_scalar()` handles list/array values |
+
+---
+
+## 📐 Key Formulas
+
+**CO₂ per km (from vehicle types):**
+```
+co2_per_km = Σ (n_vehicles_of_type × emission_factor_g_per_km)
+```
+
+**Emission factor (physics fallback):**
+```
+base = (vehicle_count / avg_speed_kmph) × length_m × 6.0
+emission_factor = (base + aqi_penalty) × road_type_premium × density_factor - veg_offset
+```
+
+**Travel time:**
+```
+time_sec = length_m / (avg_speed_kmph × 1000 / 3600)
+```
+
+---
+
+## 🛠️ Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Object Detection | YOLOv8 (Ultralytics) |
+| Deep Learning | PyTorch 2.5 |
+| Geospatial | GeoPandas, OSMNX, Shapely, PyProj |
+| Graph Routing | NetworkX |
+| Data | Pandas, NumPy, Scikit-learn |
+| Visualization | Matplotlib, Seaborn |
+| Backend Server | Flask, Flask-CORS |
+| Frontend Map | Leaflet.js |
+| Data Source | OpenStreetMap, OpenWeatherMap |
+
+---
+
+## 👤 Author
+
+**Final Year Project — B.Tech**  
+Department of Computer Science / Information Technology  
+Academic Year 2025–2026
+
+---
+
+## 📜 License
+
+This project is for academic purposes. Road data © OpenStreetMap contributors (ODbL).  
+Emission factors sourced from IPCC / European Environment Agency.
