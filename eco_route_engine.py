@@ -119,7 +119,8 @@ def physics_emission_factor(vehicle_count: int, avg_speed: float,
                              length_m: float, co2_per_km: float = None,
                              building_density: int = 5,
                              vegetation_score: int = 2,
-                             aqi: int = 100) -> float:
+                             aqi: int = 100,
+                             wind_speed_mps: float = 1.0) -> float:
     """
     Fallback emission_factor calculation (physics formula reverse-engineered
     from real data; corr=0.93 with actual carbon_cost column).
@@ -135,8 +136,9 @@ def physics_emission_factor(vehicle_count: int, avg_speed: float,
     aqi_pen  = (aqi / 200) * vehicle_count * 0.8
     density  = 1 + building_density * 0.005
     veg_off  = vegetation_score * 0.8
+    wind_dispersion = max(0.5, 1 - wind_speed_mps * 0.05) # Higher wind -> more dispersion -> lower localized emission factor
 
-    factor = (base + aqi_pen) * density - veg_off
+    factor = (base + aqi_pen) * density * wind_dispersion - veg_off
     return max(factor, 1.0)
 
 
@@ -253,9 +255,9 @@ def predict_emission_factor(row: dict, vehicle_info: dict) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  GRAPH BUILDER
 # ─────────────────────────────────────────────────────────────────────────────
-_graph_cache = None
+_graph_cache = {}
 
-def build_emission_graph(geojson_path: Path = KOLKATA_GJ,
+def build_emission_graph(city: str = "kolkata",
                           use_ml: bool = True,
                           hour: int = 8,
                           use_csv_emission: bool = True,
@@ -270,8 +272,15 @@ def build_emission_graph(geojson_path: Path = KOLKATA_GJ,
                                instead of CSV or random fallback for ALL edges
     """
     global _graph_cache
-    if _graph_cache is not None and vehicle_override is None:
-        return _graph_cache
+    geojson_path = BASE_DIR / city / "fused_roads.geojson"
+    city_key = city.lower()
+
+    if city_key in _graph_cache and vehicle_override is None:
+        return _graph_cache[city_key]
+
+    if not geojson_path.exists():
+        print(f"[WARN] No graph file found at {geojson_path}. Returning empty graph.")
+        return nx.MultiDiGraph()
 
     print(f"[INFO] Loading road network from: {geojson_path}")
     gdf = gpd.read_file(str(geojson_path))
@@ -322,6 +331,10 @@ def build_emission_graph(geojson_path: Path = KOLKATA_GJ,
                 vinfo = fallback_vehicle_count(hw, hour)
             emission_factor = predict_emission_factor(dict(row), vinfo)
 
+        # ── vehicle count for display ──────────────────────────────────────
+        vc_raw = safe_scalar(row.get("vehicle_count"), 60)
+        vc = int(float(vc_raw)) if vc_raw is not None else 60
+
         # If vehicle_override is set and we have a CSV emission, scale it
         # by the ratio of detected vehicles to stored vehicle count
         if vehicle_override is not None and emission_factor > 0:
@@ -330,13 +343,10 @@ def build_emission_graph(geojson_path: Path = KOLKATA_GJ,
                 scale = vehicle_override / stored_vc
                 emission_factor *= max(0.3, min(scale, 3.0))  # clamp [0.3x, 3x]
 
-        # ── vehicle count for display ──────────────────────────────────────
-        vc_raw = safe_scalar(row.get("vehicle_count"), 60)
-        vc = int(float(vc_raw)) if vc_raw is not None else 60
-
         bd_raw = safe_scalar(row.get("building_density"), 5)
         vs_raw = safe_scalar(row.get("vegetation_score"), 2)
         aq_raw = safe_scalar(row.get("AQI"), 100)
+        ws_raw = safe_scalar(row.get("wind_speed_mps"), 1)
 
         edge_data = {
             "length":           lng,
@@ -350,12 +360,13 @@ def build_emission_graph(geojson_path: Path = KOLKATA_GJ,
             "building_density": int(float(bd_raw)) if bd_raw is not None else 5,
             "vegetation_score": int(float(vs_raw)) if vs_raw is not None else 2,
             "AQI":              int(float(aq_raw)) if aq_raw is not None else 100,
+            "wind_speed_mps":   float(ws_raw) if ws_raw is not None else 1.0,
         }
         G.add_edge(u, v, **edge_data)
 
     print(f"[INFO] Graph: {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges")
     if vehicle_override is None:
-        _graph_cache = G
+        _graph_cache[city_key] = G
     return G
 
 
@@ -392,7 +403,7 @@ def compute_all_routes(G, origin, destination):
     return routes, strategies
 
 
-def route_stats(G, route):
+def route_stats(G, route, vehicle_override=None):
     """Compute stats for a route. Returns dict."""
     dist = time_ = ef = veh = 0
     speeds = []
@@ -401,10 +412,21 @@ def route_stats(G, route):
         if v not in G[u]:
             continue
         ed = min(G[u][v].values(), key=lambda x: x["emission_factor"])
+
+        emission = ed["emission_factor"]
+        vc = ed.get("vehicle_count", 60)
+
+        if vehicle_override is not None and emission > 0 and vc > 0:
+            scale = vehicle_override / vc
+            emission *= max(0.3, min(scale, 3.0))
+            veh_to_add = vehicle_override
+        else:
+            veh_to_add = vc
+
         dist  += ed["length"]
         time_ += ed["time"]
-        ef    += ed["emission_factor"]
-        veh   += ed.get("vehicle_count", 0)
+        ef    += emission
+        veh   += veh_to_add
         speeds.append(ed["avg_speed"])
     return {
         "distance_km":    round(dist / 1000, 3),
@@ -417,11 +439,164 @@ def route_stats(G, route):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 4b.  SCALED GRAPH BUILDER (for route overrides / segment overrides)
+# ─────────────────────────────────────────────────────────────────────────────
+MAJOR_HIGHWAYS = {
+    "primary", "secondary", "trunk", "tertiary",
+    "primary_link", "secondary_link", "trunk_link", "tertiary_link",
+}
+
+
+def get_route_edge_scales(G, route: list, override_vehicles: int) -> dict:
+    """
+    For every edge (u,v) in a route, compute a scale factor based on:
+        scale = override_vehicles / stored_vehicle_count
+    Returns { (u,v): scale_factor }
+    """
+    scales = {}
+    for i in range(len(route) - 1):
+        u, v = route[i], route[i + 1]
+        if v not in G[u]:
+            continue
+        ed = min(G[u][v].values(), key=lambda x: x["emission_factor"])
+        stored_vc = max(ed.get("vehicle_count", 60), 1)
+        scale = max(0.3, min(override_vehicles / stored_vc, 5.0))
+        scales[(u, v)] = scale
+    return scales
+
+
+def build_scaled_graph_with_overrides(
+        G: nx.MultiDiGraph,
+        segment_overrides: Optional[dict] = None,
+        route_edge_scales: Optional[dict] = None) -> nx.MultiDiGraph:
+    """
+    Return a NEW graph where emission_factor values are scaled by:
+      - segment_overrides : { "u_v" : detected_vehicle_count }
+      - route_edge_scales : { (u,v) : scale_factor }  (from per-route upload)
+
+    This is the correct fix: Dijkstra on this graph finds genuinely
+    different paths (not just different stats).
+    """
+    H = nx.MultiDiGraph()
+
+    # Copy all nodes
+    for node, data in G.nodes(data=True):
+        H.add_node(node, **data)
+
+    for u, v, key, data in G.edges(data=True, keys=True):
+        new_ef = data["emission_factor"]
+        stored_vc = max(data.get("vehicle_count", 60), 1)
+        target_vc = stored_vc
+        has_override = False
+
+        # Segment-level override takes priority
+        seg_id = f"{u}_{v}"
+        if segment_overrides and seg_id in segment_overrides:
+            target_vc = segment_overrides[seg_id]
+            has_override = True
+
+        # Route-level override (only if no segment override for this edge)
+        elif route_edge_scales and (u, v) in route_edge_scales:
+            target_vc = int(stored_vc * route_edge_scales[(u, v)])
+            has_override = True
+
+        new_data = dict(data)
+        if has_override:
+            # Dynamically recalculate incorporating wind, vegetation, building density
+            new_data["emission_factor"] = physics_emission_factor(
+                vehicle_count=target_vc,
+                avg_speed=data.get("avg_speed", 30),
+                length_m=data.get("length", 50),
+                building_density=data.get("building_density", 5),
+                vegetation_score=data.get("vegetation_score", 2),
+                aqi=data.get("AQI", 100),
+                wind_speed_mps=data.get("wind_speed_mps", 1.0)
+            )
+            new_data["vehicle_count"] = target_vc
+        else:
+            new_data["emission_factor"] = new_ef
+
+        # Also update the composite weight so balanced routing is affected too
+        H.add_edge(u, v, key=key, **new_data)
+
+    return H
+
+
+def get_route_segments(G: nx.MultiDiGraph, route: list, top_n: int = 8) -> list:
+    """
+    Extract the top `top_n` highest-emission named road segments along a route.
+    Only considers major highway types (primary / secondary / trunk / tertiary).
+    Returns a list of dicts with segment metadata for the frontend UI.
+    """
+    try:
+        from pyproj import Transformer
+        _tr = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+    except Exception:
+        _tr = None
+
+    segments = []
+    seen_names: set = set()
+
+    for i in range(len(route) - 1):
+        u, v = route[i], route[i + 1]
+        if v not in G[u]:
+            continue
+        ed = min(G[u][v].values(), key=lambda x: x["emission_factor"])
+
+        hw = ed.get("highway", "residential")
+        if hw not in MAJOR_HIGHWAYS:
+            continue
+
+        raw_name = (ed.get("name") or "").strip()
+        seg_id   = f"{u}_{v}"
+
+        # Deduplicate by road name (keep the highest-emission occurrence)
+        dedup_key = raw_name if raw_name else seg_id
+        if raw_name and dedup_key in seen_names:
+            continue
+        seen_names.add(dedup_key)
+
+        # Midpoint lat/lon for map marker
+        midpoint = None
+        geom = ed.get("geometry")
+        if geom and geom.geom_type == "LineString" and _tr:
+            try:
+                mid = geom.interpolate(0.5, normalized=True)
+                lon_, lat_ = _tr.transform(mid.x, mid.y)
+                midpoint = [round(lat_, 6), round(lon_, 6)]
+            except Exception:
+                pass
+
+        segments.append({
+            "segment_id":      seg_id,
+            "edge_u":          u,
+            "edge_v":          v,
+            "name":            raw_name or f"{hw.replace('_', ' ').title()} Segment",
+            "highway":         hw,
+            "emission_factor": round(float(ed.get("emission_factor", 0)), 1),
+            "vehicle_count":   int(ed.get("vehicle_count", 60)),
+            "length_m":        round(float(ed.get("length", 0)), 1),
+            "avg_speed_kmh":   round(float(ed.get("avg_speed", 30)), 1),
+            "midpoint":        midpoint,
+        })
+
+    segments.sort(key=lambda s: s["emission_factor"], reverse=True)
+    return segments[:top_n]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 5.  NEAREST NODE FINDER
 # ─────────────────────────────────────────────────────────────────────────────
-def nearest_node(G, lat: float, lon: float) -> int:
+def nearest_node(G, city: str, lat: float, lon: float) -> int:
     """Find graph node closest to (lat, lon) using Euclidean approx."""
-    gdf = gpd.read_file(str(KOLKATA_GJ)).to_crs("EPSG:4326")
+    geojson_path = BASE_DIR / city / "fused_roads.geojson"
+    if not geojson_path.exists():
+        if G.number_of_nodes() == 0:
+            return None
+        # fallback to first node
+        return list(G.nodes)[0]
+
+    gdf = gpd.read_file(str(geojson_path)).to_crs("EPSG:4326")
     nodes_u = gdf[["u", "geometry"]].copy()
     nodes_u["cx"] = nodes_u.geometry.apply(
         lambda g: g.coords[0][0] if g.geom_type == "Point" else g.centroid.x)
@@ -510,7 +685,8 @@ def plot_route_comparison(G, routes: dict, strategies: dict,
         ax_map.scatter(*dc, s=200, c="#F43F5E", zorder=10, edgecolors="white", linewidths=1.5)
         ax_map.annotate("  END", dc, color="#F43F5E", fontsize=9, fontweight="bold", zorder=11)
 
-    ax_map.set_title("Kolkata Eco-Routing — Route Comparison", color="white",
+    city_title = Path(save_path).stem.replace("route_compare_", "").title()
+    ax_map.set_title(f"{city_title} Eco-Routing — Route Comparison", color="white",
                      fontsize=14, fontweight="bold", pad=10)
     ax_map.legend(handles=legend_patches, loc="lower left",
                   facecolor="#1E293B", edgecolor="#475569",
@@ -525,7 +701,7 @@ def plot_route_comparison(G, routes: dict, strategies: dict,
     ax_stats.text(0.5, 0.97, "Route Statistics", color="white",
                   fontsize=15, fontweight="bold", ha="center", va="top",
                   transform=ax_stats.transAxes)
-    ax_stats.text(0.5, 0.92, "Kolkata Road Network  |  Emission Factor = g CO\u2082/segment",
+    ax_stats.text(0.5, 0.92, f"{city_title} Road Network  |  Emission Factor = g CO\u2082/segment",
                   color="#94A3B8", fontsize=8, ha="center", va="top",
                   transform=ax_stats.transAxes)
 
@@ -618,71 +794,122 @@ def plot_route_comparison(G, routes: dict, strategies: dict,
 def run_eco_routing(origin_lat: float, origin_lon: float,
                      dest_lat: float,   dest_lon: float,
                      hour: int = 8,
-                     plot_path: str = "route_compare_kolkata.png",
+                     city: str = "kolkata",
+                     plot_path: str = None,
                      use_ml: bool = True,
-                     vehicle_override: int = None) -> dict:
+                     vehicle_override: int = None,
+                     route_overrides: dict = None,
+                     segment_overrides: dict = None) -> dict:
     """
     Full pipeline:
       1. Load / cache Kolkata graph
       2. Find nearest graph nodes to (lat,lon) pairs
-      3. Compute 4 routes
-      4. Generate comparison plot
-      5. Return JSON-serialisable result dict
+      3. Compute 4 routes on base graph first (needed to extract route edges for scaling)
+      4. If route_overrides or segment_overrides present, build a scaled copy of the
+         graph and re-run Dijkstra — this physically changes the route paths on the map.
+      5. Generate comparison plot
+      6. Return JSON-serialisable result dict including per-route segment metadata.
 
-    vehicle_override: if set (from YOLO), this vehicle count is used
-                      to scale emission factors across all edges.
+    vehicle_override  : scalar used to scale ALL edges (legacy global override)
+    route_overrides   : { route_name: detected_vehicle_count }  (per-route upload)
+    segment_overrides : { "u_v": detected_vehicle_count }       (per-segment upload)
     """
-    G = build_emission_graph(use_ml=use_ml, vehicle_override=vehicle_override)
+    if plot_path is None:
+        plot_path = f"route_compare_{city}.png"
+
+    G = build_emission_graph(city=city, use_ml=use_ml, vehicle_override=vehicle_override)
+    if G.number_of_nodes() == 0:
+        return {"error": f"No network data found for city: {city}. Upload data first."}
 
     print(f"[INFO] Finding nearest nodes to origin ({origin_lat}, {origin_lon})...")
-    origin_node = nearest_node(G, origin_lat, origin_lon)
+    origin_node = nearest_node(G, city, origin_lat, origin_lon)
     print(f"[INFO] Finding nearest nodes to dest ({dest_lat}, {dest_lon})...")
-    dest_node   = nearest_node(G, dest_lat, dest_lon)
+    dest_node   = nearest_node(G, city, dest_lat, dest_lon)
     print(f"[INFO] Origin node: {origin_node}  |  Dest node: {dest_node}")
 
     if origin_node == dest_node:
         return {"error": "Origin and destination are the same node. Move them further apart."}
 
-    routes, strategies = compute_all_routes(G, origin_node, dest_node)
-
-    if not routes:
+    # ── Step 1: Base routing (always needed) ──────────────────────────────────
+    base_routes, strategies = compute_all_routes(G, origin_node, dest_node)
+    if not base_routes:
         return {"error": "No path found between these two points. Try different coordinates."}
 
-    all_stats = {name: route_stats(G, route) for name, route in routes.items()}
+    # ── Step 2: Build scaled graph if overrides are present ───────────────────
+    # This is the key fix: Dijkstra is re-run on a modified graph so the actual
+    # path coordinates change (not just the displayed emission stats).
+    active_graph = G
+    routes       = base_routes
+
+    if route_overrides or segment_overrides:
+        # Translate route-level overrides into edge-level scales
+        combined_edge_scales: dict = {}
+        if route_overrides:
+            for rname, override_vc in route_overrides.items():
+                base_route = base_routes.get(rname)
+                if base_route:
+                    edge_scales = get_route_edge_scales(G, base_route, override_vc)
+                    combined_edge_scales.update(edge_scales)
+
+        H = build_scaled_graph_with_overrides(
+            G,
+            segment_overrides=segment_overrides,
+            route_edge_scales=combined_edge_scales,
+        )
+        # Recompute composite weights on scaled graph
+        new_routes, strategies = compute_all_routes(H, origin_node, dest_node)
+        if new_routes:
+            active_graph = H
+            routes       = new_routes
+            print(f"[INFO] Re-routed on scaled graph with "
+                  f"{len(route_overrides or {})} route-overrides and "
+                  f"{len(segment_overrides or {})} segment-overrides.")
+
+    # ── Step 3: Compute stats (no extra vehicle_override needed — baked in) ───
+    all_stats: dict = {}
+    for name, route in routes.items():
+        all_stats[name] = route_stats(active_graph, route)
 
     # Best route (lowest emission_factor)
     best_name = min(all_stats, key=lambda n: all_stats[n]["emission_factor"])
 
-    plot_route_comparison(G, routes, strategies, all_stats,
+    # ── Step 4: Plot ──────────────────────────────────────────────────────────
+    plot_route_comparison(active_graph, routes, strategies, all_stats,
                           origin_node, dest_node, save_path=plot_path)
 
-    # Build GeoJSON for each route (for frontend map)
-    routes_geojson = {}
+    # ── Step 5: Build GeoJSON for each route (for frontend map) ───────────────
+    from pyproj import Transformer
+    _tr = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+
+    routes_geojson: dict = {}
     for name, route in routes.items():
         coords = []
         for i in range(len(route) - 1):
             u, v = route[i], route[i + 1]
-            if v not in G[u]:
+            if v not in active_graph[u]:
                 continue
-            ed = min(G[u][v].values(), key=lambda x: x["emission_factor"])
+            ed = min(active_graph[u][v].values(), key=lambda x: x["emission_factor"])
             geom = ed.get("geometry")
             if geom and geom.geom_type == "LineString":
-                # Convert from EPSG:3857 to lat/lon on-the-fly
-                from pyproj import Transformer
-                tr = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
                 for x, y in geom.coords:
-                    lon_, lat_ = tr.transform(x, y)
+                    lon_, lat_ = _tr.transform(x, y)
                     coords.append([lat_, lon_])
         routes_geojson[name] = coords
 
+    # ── Step 6: Extract per-route segment metadata for the upload UI ──────────
+    route_segments: dict = {}
+    for name, route in routes.items():
+        route_segments[name] = get_route_segments(active_graph, route, top_n=8)
+
     return {
-        "origin_node":  origin_node,
-        "dest_node":    dest_node,
-        "strategies":   {k: v[1] for k, v in strategies.items()},   # name→color
-        "stats":        all_stats,
-        "best_route":   best_name,
-        "routes_latlng": routes_geojson,
-        "plot_path":    plot_path,
+        "origin_node":    origin_node,
+        "dest_node":      dest_node,
+        "strategies":     {k: v[1] for k, v in strategies.items()},
+        "stats":          all_stats,
+        "best_route":     best_name,
+        "routes_latlng":  routes_geojson,
+        "plot_path":      plot_path,
+        "route_segments": route_segments,   # NEW: per-route segment metadata
     }
 
 
