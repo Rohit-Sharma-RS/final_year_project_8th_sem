@@ -40,9 +40,7 @@ cache/
 **/*.pkl
 
 # Plots and outputs
-*.png
 *.pdf
-*.html
 
 # Local data
 /data/
