@@ -125,13 +125,11 @@ def load_and_preprocess(synth_path: str, real_path: str = None,
         df["vehicle_count"] / df["avg_speed_kmph"].clip(lower=5)
     ) * df["length"]
 
-    # ── Cyclic temporal encoding ───────────────────────────────────────────
     df["hour_sin"] = np.sin(2 * np.pi * df["hour_of_day"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour_of_day"] / 24)
     df["dow_sin"]  = np.sin(2 * np.pi * df["day_of_week"] / 7)
     df["dow_cos"]  = np.cos(2 * np.pi * df["day_of_week"] / 7)
 
-    # ── Fill missing numeric values ────────────────────────────────────────
     all_num = (ROAD_FEATURES + TRAFFIC_FEATURES + EMISSION_FEATURES +
                ENV_FEATURES + TEMPORAL_FEATURES)
     for col in all_num:
@@ -141,7 +139,6 @@ def load_and_preprocess(synth_path: str, real_path: str = None,
         else:
             df[col] = 0.0
 
-    # ── Categorical encoding ───────────────────────────────────────────────
     cat_encoders = {}
     df["junction_enc"]  = df["junction"].fillna("none").astype(str)
     df["oneway_enc"]    = df["oneway"].astype(str)
@@ -155,7 +152,6 @@ def load_and_preprocess(synth_path: str, real_path: str = None,
         df[col] = le.fit_transform(df[col].astype(str))
         cat_encoders[col] = le
 
-    # ── Log-transform target (heavily right-skewed) ────────────────────────
     df[TARGET] = pd.to_numeric(df[TARGET], errors="coerce")
     df = df.dropna(subset=[TARGET])
     df[TARGET] = np.log1p(df[TARGET])
@@ -202,9 +198,6 @@ class CarbonDataset(Dataset):
         )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3.  MODEL ARCHITECTURE
-# ──────────────────────────────────────────────────────────────────────────────
 class ResidualBlock(nn.Module):
     """Pre-activation residual block with optional dimensionality change."""
     def __init__(self, in_dim: int, out_dim: int, dropout: float = 0.25):
@@ -421,10 +414,6 @@ def metrics_str(preds_log, trues_log):
     mape = np.mean(np.abs((t[mask] - p[mask]) / t[mask])) * 100 if mask.sum() > 0 else 0
     return rmse, mae, r2, mape
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 5.  PLOTS
-# ──────────────────────────────────────────────────────────────────────────────
 def plot_training_curves(train_losses, val_losses, save_path="training_curves.png"):
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.plot(train_losses, label="Train Loss (MSE)", linewidth=2)

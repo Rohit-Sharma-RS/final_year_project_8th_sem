@@ -39,7 +39,7 @@ warnings.filterwarnings("ignore")
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).parent
 KOLKATA_GJ = BASE_DIR / "kolkata" / "fused_roads.geojson"
-MODEL_PATH = BASE_DIR / "carbon_fusion_net.pt"
+MODEL_PATH = BASE_DIR / "carbon_fusion_catboost.cbm"
 
 # ── Emission factors (g CO2 / km / vehicle) ───────────────────────────────────
 EMISSIONS_G_PER_KM = {
@@ -49,19 +49,19 @@ EMISSIONS_G_PER_KM = {
 
 # ── Realistic fallback vehicle counts by road type ────────────────────────────
 FALLBACK_VEHICLE_COUNT = {
-    "residential":    (15,  80),
-    "tertiary":       (40, 140),
-    "secondary":      (80, 200),
-    "primary":        (100,250),
-    "secondary_link": (40, 110),
-    "tertiary_link":  (20,  80),
-    "living_street":  (5,   40),
-    "unclassified":   (20,  90),
-    "busway":         (20,  80),
-    "trunk":          (120, 280),
-    "trunk_link":     (80, 200),
+    "residential":    (2,  8),
+    "tertiary":       (4, 14),
+    "secondary":      (8, 20),
+    "primary":        (10,25),
+    "secondary_link": (4, 11),
+    "tertiary_link":  (2,  8),
+    "living_street":  (1,  4),
+    "unclassified":   (2,  9),
+    "busway":         (2,  8),
+    "trunk":          (12, 28),
+    "trunk_link":     (8, 20),
 }
-DEFAULT_COUNT_RANGE = (30, 130)
+DEFAULT_COUNT_RANGE = (3, 13)
 
 # ── Fallback vehicle-type mix ─────────────────────────────────────────────────
 VEHICLE_MIX = {
@@ -95,8 +95,8 @@ def fallback_vehicle_count(highway: str, hour: int = 8) -> dict:
     # Hour-of-day multiplier
     hour_mult = {
         0:0.10,1:0.07,2:0.05,3:0.05,4:0.07,5:0.20,
-        6:0.60,7:1.30,8:1.80,9:1.50,10:1.10,11:1.05,
-        12:1.10,13:1.15,14:1.05,15:1.00,16:1.20,17:1.70,
+        6:0.60,7:1.00,8:1.00,9:1.50,10:2.50,11:2.50,
+        12:2.50,13:2.50,14:1.05,15:1.00,16:1.20,17:1.70,
         18:1.90,19:1.60,20:1.20,21:0.80,22:0.50,23:0.25,
     }.get(hour % 24, 1.0)
 
@@ -154,32 +154,16 @@ def _load_model_bundle():
     if not MODEL_PATH.exists():
         return None
     try:
-        import torch
-        bundle = torch.load(str(MODEL_PATH), map_location="cpu", weights_only=False)
-        # Import the model class
-        sys.path.insert(0, str(BASE_DIR))
-        from carbon_cost_model import CarbonFusionNet, ROAD_FEATURES, TRAFFIC_FEATURES
-        from carbon_cost_model import EMISSION_FEATURES, ENV_FEATURES, TEMPORAL_FEATURES
-        from carbon_cost_model import CATEGORICAL_COLS, predict_carbon_cost
-
-        model = CarbonFusionNet(
-            cat_vocab_sizes=bundle["cat_vocab_sizes"],
-            embed_dim_each=bundle["embed_dim_each"],
-            branch_out=bundle["branch_out"],
-            dropout=bundle.get("dropout", 0.25),
-        )
-        model.load_state_dict(bundle["model_state"])
-        model.eval()
+        from catboost import CatBoostRegressor
+        model = CatBoostRegressor()
+        model.load_model(str(MODEL_PATH))
         _model_bundle = {
             "model": model,
-            "scalers": bundle["scalers"],
-            "cat_encoders": bundle["cat_encoders"],
-            "predict_fn": predict_carbon_cost,
         }
-        print("[INFO] ML model loaded successfully.")
+        print("[INFO] CatBoost model loaded successfully.")
         return _model_bundle
     except Exception as e:
-        print(f"[WARN] Could not load ML model: {e}. Using physics fallback.")
+        print(f"[WARN] Could not load CatBoost model: {e}. Using physics fallback.")
         return None
 
 
@@ -228,20 +212,40 @@ def predict_emission_factor(row: dict, vehicle_info: dict) -> float:
         "temperature_k":      float(row.get("temperature_k", 305)),
         "humidity_pct":       float(row.get("humidity_pct", 70)),
         "wind_speed_mps":     float(row.get("wind_speed_mps", 1)),
-        "hour_of_day":        8,
-        "day_of_week":        1,
-        "is_weekend":         0,
+    }
+    
+    emit = {"n_car": 120, "n_motorcycle": 72, "n_bus": 822,
+            "n_truck": 900, "n_van": 200, "n_bicycle": 0, "n_auto": 85}
+    for vtype, g in emit.items():
+        row_input["co2_" + vtype.replace("n_", "")] = vehicle_info.get(vtype, 0) * g
+
+    row_input["base_cost_feature"] = (
+        row_input["vehicle_count"] / max(row_input["avg_speed_kmph"], 5.0)
+    ) * row_input["length"]
+
+    hour = 8
+    dow = 1
+    row_input.update({
+        "hour_sin": np.sin(2 * np.pi * hour / 24),
+        "hour_cos": np.cos(2 * np.pi * hour / 24),
+        "dow_sin":  np.sin(2 * np.pi * dow / 7),
+        "dow_cos":  np.cos(2 * np.pi * dow / 7),
+        "is_weekend": 0.0,
+    })
+
+    row_input.update({
         "highway":            get_highway_str(row.get("highway", "residential")),
         "weather_description": str(row.get("weather_description", "clear sky")),
-        "junction":           row.get("junction") or None,
-        "oneway":             str(row.get("oneway", True)),
-        "reversed":           str(row.get("reversed", False)),
-    }
+        "junction_enc":       str(row.get("junction") or "none"),
+        "oneway_enc":         str(row.get("oneway", True)),
+        "reversed_enc":       str(row.get("reversed", False)),
+    })
+
+    df_input = pd.DataFrame([row_input])
+
     try:
-        val = bundle["predict_fn"](
-            bundle["model"], row_input,
-            bundle["scalers"], bundle["cat_encoders"]
-        )
+        log_val = bundle["model"].predict(df_input)[0]
+        val = np.expm1(log_val)
         return max(float(val), 1.0)
     except Exception as e:
         print(f"[WARN] ML inference failed ({e}), using physics fallback.")
@@ -424,16 +428,19 @@ def route_stats(G, route, vehicle_override=None):
             veh_to_add = vc
 
         dist  += ed["length"]
-        time_ += ed["time"]
         ef    += emission
         veh   += veh_to_add
         speeds.append(ed["avg_speed"])
+        
+    dist_km = dist / 1000.0
+    time_min = (dist_km / 40.0) * 60.0
+    
     return {
-        "distance_km":    round(dist / 1000, 3),
-        "time_min":       round(time_ / 60, 2),
+        "distance_km":    round(dist_km, 3),
+        "time_min":       round(time_min, 2),
         "emission_factor": round(ef, 1),
         "avg_vehicles":   round(veh / max(len(route) - 1, 1), 1),
-        "avg_speed_kmh":  round(sum(speeds) / len(speeds), 1) if speeds else 0,
+        "avg_speed_kmh":  40.0,
         "segments":       len(route) - 1,
     }
 
@@ -502,16 +509,8 @@ def build_scaled_graph_with_overrides(
 
         new_data = dict(data)
         if has_override:
-            # Dynamically recalculate incorporating wind, vegetation, building density
-            new_data["emission_factor"] = physics_emission_factor(
-                vehicle_count=target_vc,
-                avg_speed=data.get("avg_speed", 30),
-                length_m=data.get("length", 50),
-                building_density=data.get("building_density", 5),
-                vegetation_score=data.get("vegetation_score", 2),
-                aqi=data.get("AQI", 100),
-                wind_speed_mps=data.get("wind_speed_mps", 1.0)
-            )
+            scale = target_vc / max(stored_vc, 1)
+            new_data["emission_factor"] = new_ef * max(0.3, min(scale, 10.0))
             new_data["vehicle_count"] = target_vc
         else:
             new_data["emission_factor"] = new_ef
@@ -522,7 +521,7 @@ def build_scaled_graph_with_overrides(
     return H
 
 
-def get_route_segments(G: nx.MultiDiGraph, route: list, top_n: int = 8) -> list:
+def get_route_segments(G, route: list, top_n: int = 30) -> list:
     """
     Extract the top `top_n` highest-emission named road segments along a route.
     Only considers major highway types (primary / secondary / trunk / tertiary).
@@ -899,7 +898,7 @@ def run_eco_routing(origin_lat: float, origin_lon: float,
     # ── Step 6: Extract per-route segment metadata for the upload UI ──────────
     route_segments: dict = {}
     for name, route in routes.items():
-        route_segments[name] = get_route_segments(active_graph, route, top_n=8)
+        route_segments[name] = get_route_segments(active_graph, route, top_n=30)
 
     return {
         "origin_node":    origin_node,
