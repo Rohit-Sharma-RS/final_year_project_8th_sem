@@ -646,9 +646,9 @@ function showSegmentPanel(routeSegments) {
         </div>
         <div class="seg-actions">
           <input type="file" id="seg-file-${safeId}" data-seg-id="${seg.segment_id}"
-                 data-seg-name="${escapeHtml(seg.name)}" accept="image/*" style="display:none;"/>
+                 data-seg-name="${escapeHtml(seg.name)}" accept="image/*,video/*" style="display:none;"/>
           <button class="hint-btn" id="seg-upload-btn-${safeId}" style="font-size:.72rem;">
-            ${hasOv ? '🔄 Re-upload' : '📷 Upload Photo'}
+            ${hasOv ? '🔄 Re-upload' : '📷 Upload Photo/Video'}
           </button>
           <input type="number" class="seg-manual" id="seg-manual-${safeId}"
                  placeholder="# vehicles" min="0" max="9999"
@@ -708,6 +708,8 @@ function clearSegmentMarkers() {
 
 async function handleSegmentImageUpload(input, seg) {
   if (!input.files.length) return;
+  const file = input.files[0];
+  const isVideo = file.type.startsWith('video/');
   const safeId = seg.segment_id.replace(/[^a-zA-Z0-9]/g, '_');
   const resDiv = document.getElementById(`seg-result-${safeId}`);
   const btn    = document.getElementById(`seg-upload-btn-${safeId}`);
@@ -715,30 +717,52 @@ async function handleSegmentImageUpload(input, seg) {
 
   resDiv.style.display = "block";
   resDiv.className = "seg-result";
-  resDiv.innerHTML = `<span class="spinner"></span> Running YOLO on segment...`;
+  resDiv.innerHTML = `<span class="spinner"></span> Running YOLO on ${isVideo ? 'video' : 'image'}...`;
   btn.disabled = true;
 
-  const formData = new FormData();
-  formData.append("image", input.files[0]);
-  formData.append("segment_id", seg.segment_id);
-  formData.append("segment_name", seg.name);
-
   try {
-    const res  = await fetch(`${API}/api/detect_segment`, { method:"POST", body:formData });
-    const data = await res.json();
-
-    // Store override
-    segmentOverrides[seg.segment_id] = data.total_vehicles;
-    segmentYoloResults[seg.segment_id] = data;
-
-    if (manualInput) manualInput.value = data.total_vehicles;
-
-    document.getElementById(`seg-card-${safeId}`)?.classList.add('has-override');
-
-    renderSegmentResult(seg.segment_id, data);
-    updateApplyBtn();
-    updateEvaluateBtn();
-    setStatus("success", `Segment "${seg.name}": detected ${data.total_vehicles} vehicles via ${data.source === 'yolo_detection' ? 'YOLOv8' : 'fallback'}.`);
+    if (isVideo) {
+      // Video: send to /api/detect_video which uses centroid tracking for unique vehicles
+      const formData = new FormData();
+      formData.append("video", file);
+      formData.append("sample_rate", 5); // default sample rate
+      formData.append("segment_id", seg.segment_id);
+      formData.append("segment_name", seg.name);
+      
+      const res = await fetch(`${API}/api/detect_video`, { method: "POST", body: formData });
+      const data = await res.json();
+      
+      // Server returns unique vehicle count via centroid tracking (no multiplication needed)
+      segmentOverrides[seg.segment_id] = data.total_vehicles;
+      segmentYoloResults[seg.segment_id] = data;
+      if (manualInput) manualInput.value = data.total_vehicles;
+      
+      document.getElementById(`seg-card-${safeId}`)?.classList.add('has-override');
+      renderSegmentResult(seg.segment_id, data);
+      updateApplyBtn();
+      updateEvaluateBtn();
+      setStatus("success", `Video for "${seg.name}": detected ${data.total_vehicles} unique vehicles via centroid tracking.`);
+    } else {
+      // Image: use existing /api/detect_segment endpoint
+      const formData = new FormData();
+      formData.append("image", file);
+      formData.append("segment_id", seg.segment_id);
+      formData.append("segment_name", seg.name);
+      
+      const res = await fetch(`${API}/api/detect_segment`, { method: "POST", body: formData });
+      const data = await res.json();
+      
+      // Store override
+      segmentOverrides[seg.segment_id] = data.total_vehicles;
+      segmentYoloResults[seg.segment_id] = data;
+      if (manualInput) manualInput.value = data.total_vehicles;
+      
+      document.getElementById(`seg-card-${safeId}`)?.classList.add('has-override');
+      renderSegmentResult(seg.segment_id, data);
+      updateApplyBtn();
+      updateEvaluateBtn();
+      setStatus("success", `Segment "${seg.name}": detected ${data.total_vehicles} vehicles via ${data.source === 'yolo_detection' ? 'YOLOv8' : 'fallback'}.`);
+    }
   } catch(e) {
     resDiv.innerHTML = `<div style="color:var(--red);">Error: ${e.message}</div>`;
   } finally {
@@ -797,7 +821,6 @@ function updateApplyBtn() {
     }
   }
 }
-
 async function applyAllOverrides() {
   const rCount = Object.keys(routeYoloOverrides).length;
   const sCount = Object.keys(segmentOverrides).length;

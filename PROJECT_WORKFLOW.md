@@ -26,13 +26,6 @@ Find routes with the **least carbon footprint** considering:
 - `fused_roads.geojson` - Geographic data
 - `fused_roads.csv` - Tabular data
 
-**Carbon Cost Formula:**
-```
-carbon_cost = (length × 0.12 × vehicle_count) 
-            + (building_density × 5) 
-            - (vegetation_score × 3) 
-            + (AQI × 0.2)
-```
 
 ---
 

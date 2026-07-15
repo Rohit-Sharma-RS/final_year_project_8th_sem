@@ -169,6 +169,129 @@ def _run_yolo_detection(img_bytes: bytes) -> dict:
         return _fallback_vehicle_response(f"Detection error: {e}", as_dict=True)
 
 
+def _run_yolo_on_video(video_path: str, sample_rate: int = 5) -> dict:
+    """
+    Run YOLO detection on a video file by sampling every `sample_rate` frames.
+    Uses centroid tracking to count unique vehicles (not duplicates across frames).
+    Returns an aggregated result matching the image-detection schema.
+    """
+    model = _get_yolo_model()
+    if model is None:
+        return _fallback_vehicle_response("YOLO model not available", as_dict=True)
+
+    try:
+        import cv2
+        import numpy as np
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return _fallback_vehicle_response("Could not open video", as_dict=True)
+
+        frame_idx = 0
+        unique_vehicles = {}  # { vehicle_id: {"type": "car", "first_seen": frame_num, "last_seen": frame_num} }
+        vehicle_counter = 0
+        annotated_frame = None
+        prev_centroids = {}  # { vehicle_id: (cx, cy) }
+        centroid_distance_threshold = 50  # pixels; tracks same vehicle if it moves < 50px between frames
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_idx += 1
+            if frame_idx % sample_rate != 0:
+                continue
+
+            results = model(frame, verbose=False, conf=0.35)
+            current_centroids = []
+            current_detections = []  # List of (cx, cy, vtype)
+
+            # Extract centroids from YOLO detections
+            for box in results[0].boxes:
+                cls_id = int(box.cls[0])
+                if cls_id in VEHICLE_COCO_IDS:
+                    vtype = VEHICLE_COCO_IDS[cls_id]
+                    # Get bounding box coordinates
+                    x1, y1, x2, y2 = map(float, box.xyxy[0])
+                    cx = (x1 + x2) / 2
+                    cy = (y1 + y2) / 2
+                    current_centroids.append((cx, cy))
+                    current_detections.append((cx, cy, vtype))
+
+            # Match current centroids to previous centroids (simple centroid tracking)
+            matched = set()
+            matched_centroids = {}  # Store matches for next frame
+            
+            for i, (cx, cy, vtype) in enumerate(current_detections):
+                best_match = None
+                best_dist = centroid_distance_threshold
+                # Find closest previous centroid
+                for vid, (prev_cx, prev_cy) in prev_centroids.items():
+                    dist = ((cx - prev_cx) ** 2 + (cy - prev_cy) ** 2) ** 0.5
+                    if dist < best_dist and vid not in matched:
+                        best_dist = dist
+                        best_match = vid
+                if best_match is not None:
+                    # Update existing vehicle
+                    matched.add(best_match)
+                    matched_centroids[best_match] = (cx, cy)
+                    unique_vehicles[best_match]["last_seen"] = frame_idx
+                else:
+                    # New vehicle detected
+                    vehicle_counter += 1
+                    vid = vehicle_counter
+                    unique_vehicles[vid] = {
+                        "type": vtype,
+                        "first_seen": frame_idx,
+                        "last_seen": frame_idx,
+                    }
+                    matched_centroids[vid] = (cx, cy)
+
+            # Update prev_centroids for next frame
+            prev_centroids = matched_centroids
+
+            # Keep the last annotated sampled frame as a thumbnail
+            try:
+                annotated = results[0].plot()
+                annotated_frame = annotated
+            except Exception:
+                annotated_frame = None
+
+        cap.release()
+
+        if vehicle_counter == 0:
+            return _fallback_vehicle_response("No vehicles detected in video", as_dict=True)
+
+        # Count unique vehicles by type
+        vehicle_counts = {}
+        for vid, info in unique_vehicles.items():
+            vtype = info["type"]
+            vehicle_counts[vtype] = vehicle_counts.get(vtype, 0) + 1
+
+        total = sum(vehicle_counts.values())
+        co2_per_km = sum(
+            cnt * EMISSIONS_G_PER_KM.get(vtype, 120)
+            for vtype, cnt in vehicle_counts.items()
+        )
+
+        annotated_b64 = None
+        if annotated_frame is not None:
+            _, buf = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            annotated_b64 = base64.b64encode(buf).decode()
+
+        return {
+            "vehicle_counts": vehicle_counts,
+            "total_vehicles": total,
+            "co2_per_km_g":   co2_per_km,
+            "annotated_b64":  annotated_b64,
+            "source":         "yolo_video",
+            "message":        f"Detected {total} unique vehicles (centroid tracked) from video",
+        }
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return _fallback_vehicle_response(f"Video detection error: {e}", as_dict=True)
+
+
 @app.route("/")
 def index():
     return send_from_directory(str(BASE_DIR), "index.html")
@@ -193,6 +316,47 @@ def api_detect():
     except Exception as e:
         import traceback; traceback.print_exc()
         return _fallback_vehicle_response(f"Detection error: {str(e)}")
+
+
+@app.route("/api/detect_video", methods=["POST"])
+def api_detect_video():
+    """
+    Accept a video upload (e.g., MP4) and run YOLO across sampled frames.
+    Form field: `video` (file)
+    Optional form field: `sample_rate` (int, sample every N frames)
+    """
+    try:
+        if "video" not in request.files:
+            return _fallback_vehicle_response("No video uploaded")
+        file = request.files["video"]
+        if file.filename == "":
+            return _fallback_vehicle_response("Empty filename")
+
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1] or ".mp4") as tmp:
+            file.save(tmp.name)
+            tmp_path = tmp.name
+
+        # Optional sampling rate
+        try:
+            sample_rate = int(request.form.get("sample_rate", 5))
+            if sample_rate < 1:
+                sample_rate = 5
+        except Exception:
+            sample_rate = 5
+
+        result = _run_yolo_on_video(tmp_path, sample_rate=sample_rate)
+
+        # Clean up temp file
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+        return jsonify(result)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return _fallback_vehicle_response(f"Video detection error: {str(e)}")
 
 
 @app.route("/api/detect_segment", methods=["POST"])

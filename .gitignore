@@ -1,5 +1,11 @@
 # Python
 __pycache__/
+cache
+delhi
+kolkata
+noida
+data_fusion
+catboost_info
 __pycache__
 *.py[cod]
 *.pyo
@@ -16,6 +22,8 @@ cache
 # OS
 .DS_Store
 Thumbs.db
+agents.md
+AGENTS.md
 
 # Editors
 .vscode/
